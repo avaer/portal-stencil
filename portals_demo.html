@@ -1,0 +1,209 @@
+<html>
+  <head>
+	<title>spinnin' cubes! yes! plural!</title>
+		<style>canvas { width: 100%; height: 100% }</style>
+	</head>
+	<body>
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r82/three.js"></script>
+		<script>
+			//create basic context
+			var main_scene = new THREE.Scene();
+			var camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+			var renderer = new THREE.WebGLRenderer({stencil: true});
+			renderer.setSize(window.innerWidth, window.innerHeight);
+			document.body.appendChild(renderer.domElement);
+			
+			//create scene
+			
+			//create cube
+			var geometry = new THREE.BoxGeometry(0.5,0.5,0.5);
+			var green_material = new THREE.MeshPhongMaterial({color: 0x00ff00});
+			var cube = new THREE.Mesh(geometry, green_material);
+			main_scene.add(cube);
+			
+			//create portals
+			var portal_geom = new THREE.Geometry();
+			portal_geom.vertices.push( new THREE.Vector4( -1, -1) );
+			portal_geom.vertices.push( new THREE.Vector4(  1, -1) );
+			portal_geom.vertices.push( new THREE.Vector4( -1,  1) );
+			portal_geom.vertices.push( new THREE.Vector4(  1,  1) );
+			portal_geom.faces.push( new THREE.Face3( 0, 1, 2 ) );
+			portal_geom.faces.push( new THREE.Face3( 2, 1, 3 ) );
+			portal_geom.computeFaceNormals();
+			var red_material = new THREE.MeshPhongMaterial({color: 0xFF0000});
+			var blue_material = new THREE.MeshPhongMaterial({color: 0x0000FF});
+			var portals = [
+				new THREE.Mesh(portal_geom, blue_material),
+				new THREE.Mesh(portal_geom, red_material),
+				new THREE.Mesh(portal_geom, green_material) //this one will be a mirror technically
+			];
+			portals[0].position.copy(new THREE.Vector3(0, 0, -2));
+			portals[1].position.copy(new THREE.Vector3(0, 0, 3));
+			portals[1].rotation.copy(new THREE.Euler(0, 3.14*1, 0, 'YXZ'));
+			portals[2].position.copy(new THREE.Vector3(-2,0,0));
+			portals[2].rotation.copy(new THREE.Euler(0,3.14*0.5,0, 'YXZ'));
+			main_scene.add(portals[0]);
+			main_scene.add(portals[1]);
+			main_scene.add(portals[2]);
+			
+			
+			//create a set of 'monitor' objects based on the portals
+			var monitors = portals.map(function (obj) {
+				var new_obj = obj.clone();
+				new_obj.scale.set(0.95,0.95,0.95);
+				new_obj.material = obj.material.clone();
+				return new_obj;
+			});
+			//TODO: more straightforward way of having portals + frames
+			monitors[0].position.z+=0.001;
+			monitors[1].position.z-=0.001;
+			monitors[2].position.x+=0.001;
+			monitors[0].calc_view = function(view_matrix) {return portal_view(view_matrix, monitors[0], monitors[1]);};
+			monitors[1].calc_view = function(view_matrix) {return portal_view(view_matrix, monitors[1], monitors[0]);};
+			monitors[2].calc_view = function(view_matrix) {return portal_view(view_matrix, monitors[2], monitors[2]);}; //this is not a true mirror. TODO: actual reflection matrix
+			
+			
+			var monitors_scene = new THREE.Scene();
+			monitors_scene.add(monitors[0]);
+			monitors_scene.add(monitors[1]);
+			monitors_scene.add(monitors[2]);
+			
+			
+			//create the light
+			var light = new THREE.PointLight(0xFFFFFF);
+			light.position.set(0,1,2);
+			main_scene.add(light);
+			camera.position.z = 3;
+			
+			function portal_view(view_matrix, src_portal, dst_portal) {
+				var inverse_view_to_source = new THREE.Matrix4().getInverse(view_matrix).multiply(src_portal.matrix);
+				var new_mat = dst_portal.matrix.clone().multiply(inverse_view_to_source);
+				function rotateY( angle ) {
+
+		var te = this.elements;
+		var m11 = te[0];
+		var m21 = te[1];
+		var m31 = te[2];
+		var m41 = te[3];
+		var m13 = te[8];
+		var m23 = te[9];
+		var m33 = te[10];
+		var m43 = te[11];
+		var c = Math.cos( angle );
+		var s = Math.sin( angle );
+
+		te[0] = c * m11 - s * m13;
+		te[1] = c * m21 - s * m23;
+		te[2] = c * m31 - s * m33;
+		te[3] = c * m41 - s * m43;
+
+		te[8] = c * m13 + s * m11;
+		te[9] = c * m23 + s * m21;
+		te[10] = c * m33 + s * m31;
+		te[11] = c * m43 + s * m41;
+
+		return this;
+
+	};
+				rotateY.call(new_mat, 3.14);
+				return new_mat;
+			}
+			
+			var gl = renderer.context;
+			
+			//render all potentially recursive monitors.
+			//afterwards, the depth buffer will be filled in with the depth information of the monitors, so the monitor's view isn't overwritten
+			function render_monitors(view_matrix, recurse_level) {
+				if (recurse_level > 2) {return;} //hardcoded for now
+				
+				//for each monitor at the current level
+				monitors.forEach(function(monitor) {
+					//prepare the stencil object for this monitor. (maybe precompute this?)
+					var just_this_monitor = new THREE.Scene();
+					var stencil_monitor = monitor.clone();
+					stencil_monitor.material = monitor.material.clone();
+					stencil_monitor.material.depthWrite=false;
+					stencil_monitor.material.depthTest=false;
+					just_this_monitor.add(stencil_monitor);
+					
+					var monitor_view = monitor.calc_view(view_matrix);
+					
+					//A. increment the stencil buffer for this monitor
+					//we only want to consider adding stencil to where there's already a base
+					gl.colorMask(false,false,false,false); //disable the color buffer
+					camera.matrixWorld=view_matrix;
+					gl.stencilFunc(gl.EQUAL,recurse_level,0xFF);
+					gl.stencilOp(gl.KEEP,gl.KEEP,gl.INCR);
+					renderer.render(just_this_monitor, camera);
+					
+					//B. render sub-monitors (for hall-of-mirrors, recursive views, etc.)
+					render_monitors(monitor_view, recurse_level+1) //TODO: filter out sub-monitors based on visibility
+					
+					//C. render the main scene as seen by this monitor's view, but only where our stencil is (stencil level = recurse_level+1)
+					gl.colorMask(true,true,true,true);
+					camera.matrixWorld = monitor_view;
+					gl.stencilFunc(gl.EQUAL,recurse_level+1,0xFF);
+					gl.stencilOp(gl.KEEP,gl.KEEP,gl.KEEP); //ideally, I'd like to just DECR on success, but webgl seems not to respect that.
+					renderer.render(main_scene, camera);
+					
+					//D. finally, decrement the stencil buffer for this monitor
+					//but, only where we actually incremented it
+					gl.colorMask(false,false,false,false); //disable the color buffer
+					camera.matrixWorld=view_matrix;
+					gl.stencilFunc(gl.EQUAL,recurse_level+1,0xFF);
+					gl.stencilOp(gl.KEEP,gl.KEEP,gl.DECR);
+					renderer.render(just_this_monitor, camera);
+				});
+				
+				//protect the monitors' views at this level by drawing them in the depth buffer, as seen by the outer view.
+				//clear the current depth buffer
+				renderer.clear(false,true,false);
+				//disable color buffer - draw only to depth
+				gl.colorMask(false,false,false,false);
+				//we only care about the depth buffer within the bounds of the outer portal's stencil. don't alter the stencil, though
+				gl.stencilFunc(gl.EQUAL,recurse_level,0xFF);
+				gl.stencilOp(gl.KEEP,gl.KEEP,gl.KEEP);
+				//set the camera back to the original view
+				camera.matrixWorld = view_matrix;
+				renderer.render(monitors_scene, camera);
+			}
+			
+			//render & update loop
+			function render() {
+				
+				//requestAnimationFrame(function(){console.log('ready')});
+				requestAnimationFrame(render);
+				cube.rotation.x += 0.1;
+				cube.rotation.y += 0.1;
+				
+				//allow camera to have its matrix updated directly
+				camera.updateMatrixWorld();
+				camera.matrixAutoUpdate=false;
+				
+				//clear the old scene
+				renderer.autoClearColor=false;
+				renderer.autoClearStencil=false;
+				renderer.autoClearDepth=false;
+				renderer.clear(true,true,true);
+				
+				gl.enable(gl.STENCIL_TEST); //render monitors makes use of the stencil test all the way through.
+				render_monitors(camera.matrix,0);
+				
+				gl.colorMask(true,true,true,true); //re-enable the color buffer
+				gl.disable(gl.STENCIL_TEST); //we no longer care about the stencil for the main scene
+				renderer.render(main_scene, camera);
+				
+				camera.matrixAutoUpdate=true;
+			}
+			render();
+			
+			//simple rotating view based on mouse
+			document.addEventListener('mousemove', function(e) {
+				camera.position.set(0,0,0);
+				elevation = - 0.5*3.14 + 3.14 * e.clientY / window.innerHeight;
+				rotation = -3.14 + 6.28 * e.clientX / window.innerWidth;
+				camera.rotation.set(elevation,rotation,0, 'YXZ');
+				camera.translateZ(4);
+			});
+		</script> 
+	</body> 
